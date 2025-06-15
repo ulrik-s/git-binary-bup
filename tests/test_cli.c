@@ -35,6 +35,31 @@ static void fill_pattern(char *buf, size_t len)
         buf[i] = (char)(rand() % 256);
 }
 
+static size_t store_blob_get_chunks(git_odb_backend *backend, const void *data,
+                                    size_t len, git_oid *oid,
+                                    const void ***chunks, size_t **lens)
+{
+    assert(backend->write(backend, oid, data, len, GIT_OBJECT_BLOB) == 0);
+    return bup_backend_object_chunks(backend, oid, chunks, lens);
+}
+
+static int chunk_reused(const void *chunk, const void **old_chunks,
+                        size_t old_count)
+{
+    for (size_t j = 0; j < old_count; j++)
+        if (chunk == old_chunks[j])
+            return 1;
+    return 0;
+}
+
+static size_t chunk_offset(const size_t *lens, size_t index)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < index; i++)
+        off += lens[i];
+    return off;
+}
+
 static long long dir_size(const char *path)
 {
     struct stat st;
@@ -69,12 +94,13 @@ int main(void)
     char *data = malloc(LARGE_SIZE);
     fill_pattern(data, LARGE_SIZE);
     git_oid oid1;
+    const void **chunks1 = NULL;
+    size_t *lens1 = NULL;
     int w_before = bup_backend_write_calls();
-    assert(backend->write(backend, &oid1, data, LARGE_SIZE, GIT_OBJECT_BLOB) == 0);
+    size_t n1 = store_blob_get_chunks(backend, data, LARGE_SIZE, &oid1, &chunks1,
+                                      &lens1);
     assert(bup_backend_write_calls() == w_before + 1);
-
-    size_t chunks1 = bup_backend_object_chunks(backend, &oid1, NULL, NULL);
-    assert(chunks1 > 1);
+    assert(n1 > 1);
 
     FILE *f = fopen(TEMP_FILE, "wb");
     assert(f);
@@ -126,13 +152,31 @@ int main(void)
     data2[FLIP1] ^= 0x55;
     data2[FLIP2] ^= 0x55;
     git_oid oid2;
+    const void **chunks2 = NULL;
+    size_t *lens2 = NULL;
     w_before = bup_backend_write_calls();
-    assert(backend->write(backend, &oid2, data2, LARGE_SIZE, GIT_OBJECT_BLOB) == 0);
+    size_t n2 = store_blob_get_chunks(backend, data2, LARGE_SIZE, &oid2, &chunks2,
+                                      &lens2);
     assert(bup_backend_write_calls() == w_before + 1);
 
     size_t bup_second_size = bup_backend_total_size();
     size_t bup_second_chunks = bup_backend_chunk_count();
-    printf("git_second_before=%lld bup_second_size=%zu chunks=%zu\n", git_first, bup_second_size, bup_second_chunks);
+    printf("git_second_before=%lld bup_second_size=%zu chunks=%zu\n", git_first,
+           bup_second_size, bup_second_chunks);
+
+    assert(n1 == n2);
+    size_t new_idx[2];
+    size_t new_count = 0;
+    for (size_t i = 0; i < n2; i++)
+        if (!chunk_reused(chunks2[i], chunks1, n1))
+            new_idx[new_count++] = i;
+    assert(new_count == 2);
+    assert(new_idx[0] == 0 && new_idx[1] == 9);
+    for (size_t j = 0; j < new_count; j++) {
+        size_t off = chunk_offset(lens2, new_idx[j]);
+        assert(memcmp(data + off, data2 + off, lens2[new_idx[j]]) != 0);
+        assert(memcmp(data2 + off, data2 + off, lens2[new_idx[j]]) == 0);
+    }
 
     f = fopen(filepath, "wb");
     fwrite(data2, 1, LARGE_SIZE, f);
@@ -146,7 +190,7 @@ int main(void)
     long long git_second = dir_size(repo);
     printf("git_second=%lld\n", git_second);
 
-    assert(bup_second_chunks <= bup_first_chunks + 3);
+    assert(bup_second_chunks == bup_first_chunks + 2);
     printf("growth git=%lld backend=%zu\n", git_second - git_first,
            bup_second_size - bup_first_size);
     assert(git_second > git_first);
@@ -155,6 +199,10 @@ int main(void)
     system(cmd);
     remove(TEMP_FILE);
     backend->free(backend);
+    free(chunks1);
+    free(lens1);
+    free(chunks2);
+    free(lens2);
     free(data);
     free(data2);
     git_libgit2_shutdown();
