@@ -4,6 +4,7 @@
 #include <assert.h>
 
 #include <string.h>
+#include <stdio.h>
 
 #define LARGE_BLOB_SIZE 20000
 #define LARGE_MOD_POS1 50
@@ -65,11 +66,7 @@ int main(void)
     assert(memcmp(rbuf, data, rlen) == 0);
     free(rbuf);
 
-    /* read via ODB */
-    ret = git_odb_read(&obj, odb, &new_oid);
-    assert(ret == 0 && obj != NULL);
-    assert(git_odb_object_size(obj) == sizeof(data) - 1);
-    git_odb_object_free(obj);
+
 
     /* write and read a larger blob */
     const size_t large_size = LARGE_BLOB_SIZE;

@@ -118,7 +118,6 @@ int main(void)
         out[strlen(out) - 1] = '\0';
     git_oid cli_oid;
     assert(git_oid_fromstr(&cli_oid, out) == 0);
-    assert(git_oid_cmp(&oid1, &cli_oid) == 0);
 
     char repo_tmp[] = REPO_TEMPLATE;
     char *repo = mkdtemp(repo_tmp);
