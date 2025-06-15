@@ -22,3 +22,7 @@ add_test(NAME test_chunk_reuse COMMAND test_chunk_reuse)
 add_executable(test_cli tests/test_cli.c)
 target_link_libraries(test_cli bup_odb ${LIBGIT2_LIBRARIES})
 add_test(NAME test_cli COMMAND test_cli)
+
+add_executable(test_many_commits tests/test_many_commits.c)
+target_link_libraries(test_many_commits bup_odb ${LIBGIT2_LIBRARIES})
+add_test(NAME test_many_commits COMMAND test_many_commits)
