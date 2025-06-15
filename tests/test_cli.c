@@ -18,14 +18,7 @@
 
 static const char *detect_cli(void)
 {
-    FILE *p = popen("which git2 2>/dev/null", "r");
-    if (p) {
-        int ch = fgetc(p);
-        pclose(p);
-        if (ch != EOF)
-            return "git2";
-    }
-    return "git";
+    return "./git2";
 }
 
 static void fill_pattern(char *buf, size_t len)

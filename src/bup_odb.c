@@ -336,8 +336,22 @@ static int bup_backend_read(void **buffer, size_t *len, git_object_t *type,
     if (!obj)
         obj = read_chunk_blob(b, oid);
 
-    if (!obj)
-        return GIT_ENOTFOUND;
+    if (!obj) {
+        git_odb_object *base_obj = NULL;
+        if (git_odb_read(&base_obj, b->odb, oid) < 0)
+            return GIT_ENOTFOUND;
+
+        *type = git_odb_object_type(base_obj);
+        *len = git_odb_object_size(base_obj);
+        *buffer = malloc(*len);
+        if (!*buffer) {
+            git_odb_object_free(base_obj);
+            return -1;
+        }
+        memcpy(*buffer, git_odb_object_data(base_obj), *len);
+        git_odb_object_free(base_obj);
+        return 0;
+    }
 
     *type = obj->type;
     *len = obj->size;
@@ -368,6 +382,9 @@ static int bup_backend_write(git_odb_backend *backend, const git_oid *oid,
 {
     bup_odb_backend *b = (bup_odb_backend *)backend;
     write_calls++;
+
+    if (type != GIT_OBJECT_BLOB)
+        return git_odb_write((git_oid *)oid, b->odb, data, len, type);
 
     struct bup_object *obj = object_create(type);
     if (!obj)
