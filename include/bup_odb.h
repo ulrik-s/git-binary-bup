@@ -13,6 +13,10 @@ int bup_odb_backend_new(git_odb_backend **out, const char *path);
 int bup_backend_read_calls(void);
 int bup_backend_write_calls(void);
 int bup_backend_free_calls(void);
+int bup_backend_chunk_count(void);
+size_t bup_backend_total_size(void);
+size_t bup_backend_object_chunks(git_odb_backend *backend, const git_oid *oid,
+                                 const void ***chunks, size_t **lengths);
 
 #ifdef __cplusplus
 }
