@@ -4,6 +4,7 @@
 #include <git2.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 struct bup_odb_backend {
     git_odb_backend parent;
@@ -35,11 +36,129 @@ typedef struct bup_object {
     struct bup_object *next;
 } bup_object;
 
+static struct bup_object *object_create(git_object_t type);
+static int object_add_chunk_oid(bup_odb_backend *b, struct bup_object *obj,
+                                const git_oid *oid, size_t len);
+
 static int read_calls = 0;
 static int write_calls = 0;
 static int free_calls = 0;
 static int chunk_count = 0;
 static size_t chunk_total_size = 0;
+
+
+/*
+ * Chunks are stored as regular git blobs.  The parent blob stores a text list
+ * of chunk object IDs and lengths.  These helpers serialise and parse that
+ * format.
+ */
+
+static int write_chunk_list(bup_odb_backend *b, struct bup_object *obj)
+{
+    size_t count = 0;
+    for (bup_obj_chunk *oc = obj->chunks; oc; oc = oc->next)
+        count++;
+
+    size_t est = count * (GIT_OID_HEXSZ + 1 + 20 + 1);
+    char *buf = malloc(est);
+    if (!buf)
+        return -1;
+
+    char *p = buf;
+    for (bup_obj_chunk *oc = obj->chunks; oc; oc = oc->next) {
+        char hex[GIT_OID_HEXSZ + 1];
+        git_oid_tostr(hex, sizeof(hex), &oc->chunk->oid);
+        int n = sprintf(p, "%s %zu\n", hex, oc->chunk->len);
+        p += n;
+    }
+
+    git_oid oid;
+    int ret = git_odb_write(&oid, b->odb, buf, (size_t)(p - buf), GIT_OBJECT_BLOB);
+    free(buf);
+    if (ret < 0)
+        return -1;
+
+    git_oid_cpy(&obj->oid, &oid);
+    return 0;
+}
+
+static struct bup_object *read_chunk_blob(bup_odb_backend *b, const git_oid *oid)
+{
+    git_odb_object *blob = NULL;
+    if (git_odb_read(&blob, b->odb, oid) < 0)
+        return NULL;
+
+    const char *data = git_odb_object_data(blob);
+    size_t size = git_odb_object_size(blob);
+
+    struct bup_object *obj = object_create(GIT_OBJECT_BLOB);
+    if (!obj) {
+        git_odb_object_free(blob);
+        return NULL;
+    }
+
+    git_oid_cpy(&obj->oid, oid);
+    const char *ptr = data;
+    const char *end = data + size;
+    char hex[GIT_OID_HEXSZ + 1];
+
+    while (ptr < end) {
+        if (ptr + GIT_OID_HEXSZ + 1 >= end) {
+            git_odb_object_free(blob);
+            goto fail;
+        }
+        memcpy(hex, ptr, GIT_OID_HEXSZ);
+        hex[GIT_OID_HEXSZ] = '\0';
+        ptr += GIT_OID_HEXSZ;
+        if (*ptr != ' ') {
+            git_odb_object_free(blob);
+            goto fail;
+        }
+        ptr++;
+        char *next = NULL;
+        size_t len = strtoull(ptr, &next, 10);
+        if (!next || next >= end || (*next != '\n' && *next != '\r')) {
+            git_odb_object_free(blob);
+            goto fail;
+        }
+        ptr = next + 1;
+
+        git_oid c_oid;
+        if (git_oid_fromstr(&c_oid, hex) < 0 ||
+            object_add_chunk_oid(b, obj, &c_oid, len) < 0) {
+            git_odb_object_free(blob);
+            goto fail;
+        }
+    }
+
+    git_odb_object_free(blob);
+    obj->next = b->objects;
+    b->objects = obj;
+    return obj;
+
+fail:
+    {
+        bup_obj_chunk *oc = obj->chunks;
+        while (oc) {
+            bup_obj_chunk *n = oc->next;
+            if (--oc->chunk->refcount == 0) {
+                bup_chunk **pc = &b->chunk_pool;
+                while (*pc && *pc != oc->chunk)
+                    pc = &(*pc)->next_global;
+                if (*pc)
+                    *pc = oc->chunk->next_global;
+                chunk_total_size -= oc->chunk->len;
+                chunk_count--;
+                free(oc->chunk);
+            }
+            free(oc);
+            oc = n;
+        }
+    }
+    free(obj);
+    return NULL;
+}
+
 
 #define BUP_WINDOWBITS 6
 #define BUP_WINDOWSIZE (1 << BUP_WINDOWBITS)
@@ -121,6 +240,51 @@ static bup_chunk *chunk_get_or_create(bup_odb_backend *b, const void *data, size
     return c;
 }
 
+static bup_chunk *chunk_get_or_load(bup_odb_backend *b, const git_oid *oid, size_t len)
+{
+    for (bup_chunk *c = b->chunk_pool; c; c = c->next_global) {
+        if (git_oid_cmp(&c->oid, oid) == 0) {
+            c->refcount++;
+            return c;
+        }
+    }
+
+    bup_chunk *c = malloc(sizeof(*c));
+    if (!c)
+        return NULL;
+    git_oid_cpy(&c->oid, oid);
+    c->len = len;
+    c->refcount = 1;
+    c->next_global = b->chunk_pool;
+    b->chunk_pool = c;
+    chunk_total_size += len;
+    chunk_count++;
+    return c;
+}
+
+static int object_add_chunk_oid(bup_odb_backend *backend, struct bup_object *obj,
+                                const git_oid *oid, size_t len)
+{
+    bup_chunk *c = chunk_get_or_load(backend, oid, len);
+    if (!c)
+        return -1;
+    bup_obj_chunk *oc = malloc(sizeof(*oc));
+    if (!oc)
+        return -1;
+    oc->chunk = c;
+    oc->next = NULL;
+    if (!obj->chunks) {
+        obj->chunks = oc;
+    } else {
+        bup_obj_chunk *tail = obj->chunks;
+        while (tail->next)
+            tail = tail->next;
+        tail->next = oc;
+    }
+    obj->size += len;
+    return 0;
+}
+
 static int object_add_chunk(bup_odb_backend *backend, struct bup_object *obj,
                             const void *data, size_t len)
 {
@@ -168,6 +332,9 @@ static int bup_backend_read(void **buffer, size_t *len, git_object_t *type,
             break;
         obj = obj->next;
     }
+
+    if (!obj)
+        obj = read_chunk_blob(b, oid);
 
     if (!obj)
         return GIT_ENOTFOUND;
@@ -232,16 +399,14 @@ static int bup_backend_write(git_odb_backend *backend, const git_oid *oid,
             goto error;
     }
 
-    git_oid h;
-    if (git_odb_hash(&h, data, len, type) < 0)
+    if (write_chunk_list(b, obj) < 0)
         goto error;
-    git_oid_cpy(&obj->oid, &h);
 
     obj->next = b->objects;
     b->objects = obj;
 
     if (oid)
-        git_oid_cpy((git_oid *)oid, &h);
+        git_oid_cpy((git_oid *)oid, &obj->oid);
 
     return 0;
 
@@ -371,6 +536,8 @@ size_t bup_backend_object_chunks(git_odb_backend *backend, const git_oid *oid,
             break;
         obj = obj->next;
     }
+    if (!obj)
+        obj = read_chunk_blob(b, oid);
     if (!obj)
         return 0;
 
