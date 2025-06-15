@@ -22,28 +22,28 @@ static char *generate_random_blob(size_t size, unsigned int seed)
 
 static size_t store_blob_and_get_chunks(git_odb_backend *backend,
                                         const void *data, size_t size,
-                                        git_oid *oid, const void ***chunks,
+                                        git_oid *oid, git_oid **chunks,
                                         size_t **lens)
 {
     assert(backend->write(backend, oid, data, size, GIT_OBJECT_BLOB) == 0);
     return bup_backend_object_chunks(backend, oid, chunks, lens);
 }
 
-static int chunk_reused(const void *chunk, const void **old_chunks,
+static int chunk_reused(const git_oid *chunk, const git_oid *old_chunks,
                         size_t old_count)
 {
     for (size_t j = 0; j < old_count; j++)
-        if (chunk == old_chunks[j])
+        if (git_oid_cmp(chunk, &old_chunks[j]) == 0)
             return 1;
     return 0;
 }
 
-static size_t count_reused_chunks(const void **new_chunks, size_t new_count,
-                                  const void **old_chunks, size_t old_count)
+static size_t count_reused_chunks(const git_oid *new_chunks, size_t new_count,
+                                  const git_oid *old_chunks, size_t old_count)
 {
     size_t reused = 0;
     for (size_t i = 0; i < new_count; i++)
-        if (chunk_reused(new_chunks[i], old_chunks, old_count))
+        if (chunk_reused(&new_chunks[i], old_chunks, old_count))
             reused++;
     return reused;
 }
@@ -61,16 +61,16 @@ static size_t find_chunk_index_for_offset(size_t offset, const size_t *lens,
 }
 
 static int modification_triggers_new_chunk(size_t offset,
-                                           const void **new_chunks,
+                                           const git_oid *new_chunks,
                                            const size_t *new_lens,
                                            size_t new_count,
-                                           const void **old_chunks,
+                                           const git_oid *old_chunks,
                                            size_t old_count)
 {
     size_t idx = find_chunk_index_for_offset(offset, new_lens, new_count);
     if (idx >= new_count)
         return 0;
-    return !chunk_reused(new_chunks[idx], old_chunks, old_count);
+    return !chunk_reused(&new_chunks[idx], old_chunks, old_count);
 }
 
 int main(void)
@@ -82,7 +82,7 @@ int main(void)
 
     char *data = generate_random_blob(BLOB_SIZE, RANDOM_SEED);
     git_oid oid1;
-    const void **chunks1 = NULL;
+    git_oid *chunks1 = NULL;
     size_t *lens1 = NULL;
     size_t n1 =
         store_blob_and_get_chunks(backend, data, BLOB_SIZE, &oid1, &chunks1,
@@ -99,7 +99,7 @@ int main(void)
         data2[mods[i]] ^= FLIP_MASK;
 
     git_oid oid2;
-    const void **chunks2 = NULL;
+    git_oid *chunks2 = NULL;
     size_t *lens2 = NULL;
     size_t n2 =
         store_blob_and_get_chunks(backend, data2, BLOB_SIZE, &oid2, &chunks2,

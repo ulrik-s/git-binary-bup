@@ -1,12 +1,14 @@
 #include "bup_odb.h"
 #include <git2/sys/odb_backend.h>
 #include <git2/odb.h>
+#include <git2.h>
 #include <string.h>
 #include <stdlib.h>
 
 struct bup_odb_backend {
     git_odb_backend parent;
     char *path;
+    git_odb *odb;
     struct bup_object *objects;
     struct bup_chunk *chunk_pool;
 };
@@ -14,7 +16,7 @@ struct bup_odb_backend {
 typedef struct bup_odb_backend bup_odb_backend;
 
 typedef struct bup_chunk {
-    void *data;
+    git_oid oid;
     size_t len;
     int refcount;
     struct bup_chunk *next_global;
@@ -78,17 +80,17 @@ static inline uint32_t rollsum_digest(Rollsum *r)
     return (r->s1 << BUP_ROLL_SHIFT) | (r->s2 & BUP_ROLL_MASK);
 }
 
-static bup_chunk *chunk_create(const void *data, size_t len)
+static bup_chunk *chunk_create(bup_odb_backend *b, const void *data, size_t len)
 {
+    git_oid oid;
+    if (git_odb_write(&oid, b->odb, data, len, GIT_OBJECT_BLOB) < 0)
+        return NULL;
+
     bup_chunk *c = malloc(sizeof(*c));
     if (!c)
         return NULL;
-    c->data = malloc(len);
-    if (!c->data) {
-        free(c);
-        return NULL;
-    }
-    memcpy(c->data, data, len);
+
+    git_oid_cpy(&c->oid, &oid);
     c->len = len;
     c->refcount = 0;
     c->next_global = NULL;
@@ -98,16 +100,18 @@ static bup_chunk *chunk_create(const void *data, size_t len)
 
 static bup_chunk *chunk_get_or_create(bup_odb_backend *b, const void *data, size_t len)
 {
-    bup_chunk *c = b->chunk_pool;
-    while (c) {
-        if (c->len == len && memcmp(c->data, data, len) == 0) {
+    git_oid oid;
+    if (git_odb_hash(&oid, data, len, GIT_OBJECT_BLOB) < 0)
+        return NULL;
+
+    for (bup_chunk *c = b->chunk_pool; c; c = c->next_global) {
+        if (git_oid_cmp(&c->oid, &oid) == 0) {
             c->refcount++;
             return c;
         }
-        c = c->next_global;
     }
 
-    c = chunk_create(data, len);
+    bup_chunk *c = chunk_create(b, data, len);
     if (!c)
         return NULL;
     c->refcount = 1;
@@ -178,8 +182,15 @@ static int bup_backend_read(void **buffer, size_t *len, git_object_t *type,
     bup_obj_chunk *oc = obj->chunks;
     while (oc) {
         bup_chunk *c = oc->chunk;
-        memcpy((char *)(*buffer) + ofs, c->data, c->len);
-        ofs += c->len;
+        git_odb_object *chunk_obj = NULL;
+        if (git_odb_read(&chunk_obj, b->odb, &c->oid) < 0) {
+            free(*buffer);
+            return -1;
+        }
+        memcpy((char *)(*buffer) + ofs, git_odb_object_data(chunk_obj),
+               git_odb_object_size(chunk_obj));
+        ofs += git_odb_object_size(chunk_obj);
+        git_odb_object_free(chunk_obj);
         oc = oc->next;
     }
     return 0;
@@ -247,7 +258,6 @@ error:
                     pc = &(*pc)->next_global;
                 if (*pc == c)
                     *pc = c->next_global;
-                free(c->data);
                 chunk_total_size -= c->len;
                 free(c);
                 chunk_count--;
@@ -277,7 +287,6 @@ static void bup_backend_free(git_odb_backend *backend)
                     pc = &(*pc)->next_global;
                 if (*pc == c)
                     *pc = c->next_global;
-                free(c->data);
                 chunk_total_size -= c->len;
                 free(c);
                 chunk_count--;
@@ -288,6 +297,7 @@ static void bup_backend_free(git_odb_backend *backend)
         free(obj);
         obj = nobj;
     }
+    git_odb_free(b->odb);
     free(b->path);
     free(b);
 }
@@ -300,6 +310,16 @@ int bup_odb_backend_new(git_odb_backend **out, const char *path)
 
     backend->path = path ? strdup(path) : NULL;
 
+    git_repository *repo = NULL;
+    const char *repo_path = backend->path ? backend->path : ".";
+    if (git_repository_open_ext(&repo, repo_path, 0, NULL) < 0)
+        goto error;
+    if (git_repository_odb(&backend->odb, repo) < 0) {
+        git_repository_free(repo);
+        goto error;
+    }
+    git_repository_free(repo);
+
     backend->parent.version = GIT_ODB_BACKEND_VERSION;
     backend->parent.read = bup_backend_read;
     backend->parent.write = bup_backend_write;
@@ -309,6 +329,11 @@ int bup_odb_backend_new(git_odb_backend **out, const char *path)
 
     *out = (git_odb_backend *)backend;
     return 0;
+
+error:
+    free(backend->path);
+    free(backend);
+    return -1;
 }
 
 int bup_backend_read_calls(void)
@@ -337,7 +362,7 @@ size_t bup_backend_total_size(void)
 }
 
 size_t bup_backend_object_chunks(git_odb_backend *backend, const git_oid *oid,
-                                 const void ***chunks, size_t **lengths)
+                                 git_oid **chunk_oids, size_t **lengths)
 {
     bup_odb_backend *b = (bup_odb_backend *)backend;
     struct bup_object *obj = b->objects;
@@ -356,16 +381,16 @@ size_t bup_backend_object_chunks(git_odb_backend *backend, const git_oid *oid,
         oc = oc->next;
     }
 
-    if (chunks)
-        *chunks = malloc(sizeof(void *) * count);
+    if (chunk_oids)
+        *chunk_oids = malloc(sizeof(git_oid) * count);
     if (lengths)
         *lengths = malloc(sizeof(size_t) * count);
 
     oc = obj->chunks;
     size_t i = 0;
     while (oc) {
-        if (chunks)
-            ((void **)*chunks)[i] = (void *)oc->chunk;
+        if (chunk_oids)
+            git_oid_cpy(&(*chunk_oids)[i], &oc->chunk->oid);
         if (lengths)
             (*lengths)[i] = oc->chunk->len;
         oc = oc->next;

@@ -37,17 +37,17 @@ static void fill_pattern(char *buf, size_t len)
 
 static size_t store_blob_get_chunks(git_odb_backend *backend, const void *data,
                                     size_t len, git_oid *oid,
-                                    const void ***chunks, size_t **lens)
+                                    git_oid **chunks, size_t **lens)
 {
     assert(backend->write(backend, oid, data, len, GIT_OBJECT_BLOB) == 0);
     return bup_backend_object_chunks(backend, oid, chunks, lens);
 }
 
-static int chunk_reused(const void *chunk, const void **old_chunks,
+static int chunk_reused(const git_oid *chunk, const git_oid *old_chunks,
                         size_t old_count)
 {
     for (size_t j = 0; j < old_count; j++)
-        if (chunk == old_chunks[j])
+        if (git_oid_cmp(chunk, &old_chunks[j]) == 0)
             return 1;
     return 0;
 }
@@ -94,7 +94,7 @@ int main(void)
     char *data = malloc(LARGE_SIZE);
     fill_pattern(data, LARGE_SIZE);
     git_oid oid1;
-    const void **chunks1 = NULL;
+    git_oid *chunks1 = NULL;
     size_t *lens1 = NULL;
     int w_before = bup_backend_write_calls();
     size_t n1 = store_blob_get_chunks(backend, data, LARGE_SIZE, &oid1, &chunks1,
@@ -152,7 +152,7 @@ int main(void)
     data2[FLIP1] ^= 0x55;
     data2[FLIP2] ^= 0x55;
     git_oid oid2;
-    const void **chunks2 = NULL;
+    git_oid *chunks2 = NULL;
     size_t *lens2 = NULL;
     w_before = bup_backend_write_calls();
     size_t n2 = store_blob_get_chunks(backend, data2, LARGE_SIZE, &oid2, &chunks2,
@@ -168,7 +168,7 @@ int main(void)
     size_t new_idx[2];
     size_t new_count = 0;
     for (size_t i = 0; i < n2; i++)
-        if (!chunk_reused(chunks2[i], chunks1, n1))
+        if (!chunk_reused(&chunks2[i], chunks1, n1))
             new_idx[new_count++] = i;
     assert(new_count == 2);
     assert(new_idx[0] == 0 && new_idx[1] == 9);
