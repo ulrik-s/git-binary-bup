@@ -1,5 +1,4 @@
 #include "bup_odb.h"
-#include "chunk_utils.h"
 #include <git2/sys/odb_backend.h>
 #include <git2/odb.h>
 #include <git2.h>
@@ -7,71 +6,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-struct bup_odb_backend {
-    git_odb_backend parent;
-    char *path;
-    git_odb *odb;
-    struct bup_chunk *chunk_pool;
-};
 
-typedef struct bup_odb_backend bup_odb_backend;
 
 static int read_calls = 0;
 static int write_calls = 0;
 static int free_calls = 0;
-
-static int parse_chunk_list(const char *data, size_t size,
-                            git_oid **oids, size_t **lengths, size_t *count)
-{
-    const char *ptr = data;
-    const char *end = data + size;
-    size_t n = 0;
-    while (ptr < end) {
-        const char *nl = memchr(ptr, '\n', (size_t)(end - ptr));
-        if (!nl)
-            return -1;
-        n++;
-        ptr = nl + 1;
-    }
-
-    git_oid *tmp_oids = malloc(sizeof(git_oid) * n);
-    size_t *tmp_len = malloc(sizeof(size_t) * n);
-    if (!tmp_oids || !tmp_len) {
-        free(tmp_oids);
-        free(tmp_len);
-        return -1;
-    }
-
-    ptr = data;
-    for (size_t i = 0; i < n; i++) {
-        const char *nl = memchr(ptr, '\n', (size_t)(end - ptr));
-        const char *sp = memchr(ptr, ' ', (size_t)(nl - ptr));
-        if (!nl || !sp || (size_t)(sp - ptr) != GIT_OID_HEXSZ)
-            goto fail;
-
-        char hex[GIT_OID_HEXSZ + 1];
-        memcpy(hex, ptr, GIT_OID_HEXSZ);
-        hex[GIT_OID_HEXSZ] = '\0';
-        if (git_oid_fromstr(&tmp_oids[i], hex) < 0)
-            goto fail;
-
-        tmp_len[i] = (size_t)strtoull(sp + 1, NULL, 10);
-
-        ptr = nl + 1;
-    }
-
-    *oids = tmp_oids;
-    *lengths = tmp_len;
-    *count = n;
-    return 0;
-
-fail:
-    free(tmp_oids);
-    free(tmp_len);
-    return -1;
-}
-
-
 
 static int bup_backend_read(void **buffer, size_t *len, git_object_t *type,
                            git_odb_backend *backend, const git_oid *oid)
@@ -166,9 +105,11 @@ static int bup_backend_write(git_odb_backend *backend, const git_oid *oid,
         rollsum_roll(&r, buf[i]);
         chunk_len++;
 
-        if (chunk_len >= BUP_MIN_CHUNK &&
-            ((rollsum_digest(&r) & BUP_CHUNK_MASK) == 0 ||
-             chunk_len >= BUP_MAX_CHUNK)) {
+        int at_end = (i == len - 1);
+        int boundary = chunk_len >= BUP_MIN_CHUNK &&
+                       ((rollsum_digest(&r) & BUP_CHUNK_MASK) == 0 ||
+                        chunk_len >= BUP_MAX_CHUNK);
+        if (boundary || at_end) {
             bup_chunk *c = chunk_get_or_create(b->odb, &b->chunk_pool,
                                                buf + chunk_start, chunk_len);
             if (!c) {
@@ -182,19 +123,6 @@ static int bup_backend_write(git_odb_backend *backend, const git_oid *oid,
             chunk_start = i + 1;
             chunk_len = 0;
         }
-    }
-
-    if (chunk_len > 0) {
-        bup_chunk *c = chunk_get_or_create(b->odb, &b->chunk_pool,
-                                           buf + chunk_start, chunk_len);
-        if (!c) {
-            free(list);
-            return -1;
-        }
-        char hex[GIT_OID_HEXSZ + 1];
-        git_oid_tostr(hex, sizeof(hex), &c->oid);
-        int n = snprintf(list + pos, est_size - pos, "%s %zu\n", hex, c->len);
-        pos += (size_t)n;
     }
 
     int ret = git_odb_write((git_oid *)oid, b->odb, list, pos,
@@ -271,31 +199,3 @@ size_t bup_backend_total_size(void)
     return chunk_pool_total_size();
 }
 
-size_t bup_backend_object_chunks(git_odb_backend *backend, const git_oid *oid,
-                                 git_oid **chunk_oids, size_t **lengths)
-{
-    bup_odb_backend *b = (bup_odb_backend *)backend;
-    git_odb_object *obj = NULL;
-    if (git_odb_read(&obj, b->odb, oid) < 0)
-        return 0;
-
-    git_oid *oids = NULL;
-    size_t *lens = NULL;
-    size_t count = 0;
-    if (parse_chunk_list(git_odb_object_data(obj), git_odb_object_size(obj),
-                         &oids, &lens, &count) < 0) {
-        git_odb_object_free(obj);
-        return 0;
-    }
-    git_odb_object_free(obj);
-
-    if (chunk_oids)
-        *chunk_oids = oids;
-    else
-        free(oids);
-    if (lengths)
-        *lengths = lens;
-    else
-        free(lens);
-    return count;
-}
