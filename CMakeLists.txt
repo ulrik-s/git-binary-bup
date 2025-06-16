@@ -34,3 +34,8 @@ add_executable(test_many_commits tests/test_many_commits.c)
 target_link_libraries(test_many_commits bup_odb ${LIBGIT2_LIBRARIES})
 add_test(NAME test_many_commits COMMAND test_many_commits)
 set_tests_properties(test_many_commits PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+add_executable(test_repack_fsck tests/test_repack_fsck.c)
+target_link_libraries(test_repack_fsck bup_odb ${LIBGIT2_LIBRARIES})
+add_test(NAME test_repack_fsck COMMAND test_repack_fsck)
+set_tests_properties(test_repack_fsck PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

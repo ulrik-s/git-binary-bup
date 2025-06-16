@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <git2/pack.h>
 
 static int cmd_hash_object(const char *file)
 {
@@ -257,6 +258,104 @@ out:
     return ret;
 }
 
+static int walk_tree(git_repository *repo, git_tree *tree)
+{
+    size_t count = git_tree_entrycount(tree);
+    for (size_t i = 0; i < count; i++) {
+        const git_tree_entry *entry = git_tree_entry_byindex(tree, i);
+        git_object *obj = NULL;
+        int ret = git_tree_entry_to_object(&obj, repo, entry);
+        if (ret < 0)
+            return ret;
+        if (git_object_type(obj) == GIT_OBJECT_TREE) {
+            ret = walk_tree(repo, (git_tree *)obj);
+            git_object_free(obj);
+            if (ret < 0)
+                return ret;
+        } else {
+            git_object_free(obj);
+        }
+    }
+    return 0;
+}
+
+static int cmd_fsck(const char *repo_path)
+{
+    git_repository *repo = NULL;
+    int ret = git_repository_open(&repo, repo_path);
+    if (ret < 0)
+        return ret;
+
+    git_odb *odb = NULL;
+    git_repository_odb(&odb, repo);
+
+    git_revwalk *walk = NULL;
+    ret = git_revwalk_new(&walk, repo);
+    if (ret < 0)
+        goto out;
+    git_revwalk_push_head(walk);
+
+    git_oid oid;
+    while ((ret = git_revwalk_next(&oid, walk)) == 0) {
+        git_commit *commit = NULL;
+        if (git_commit_lookup(&commit, repo, &oid) < 0) {
+            ret = -1;
+            break;
+        }
+        git_tree *tree = NULL;
+        if (git_commit_tree(&tree, commit) < 0) {
+            git_commit_free(commit);
+            ret = -1;
+            break;
+        }
+        ret = walk_tree(repo, tree);
+        git_tree_free(tree);
+        git_commit_free(commit);
+        if (ret < 0)
+            break;
+    }
+
+    if (ret == GIT_ITEROVER)
+        ret = 0;
+
+    git_revwalk_free(walk);
+out:
+    git_odb_free(odb);
+    git_repository_free(repo);
+    return ret;
+}
+
+static int cmd_repack(const char *repo_path)
+{
+    git_repository *repo = NULL;
+    int ret = git_repository_open(&repo, repo_path);
+    if (ret < 0)
+        return ret;
+
+    git_packbuilder *pb = NULL;
+    ret = git_packbuilder_new(&pb, repo);
+    if (ret < 0)
+        goto out_repo;
+
+    git_revwalk *walk = NULL;
+    ret = git_revwalk_new(&walk, repo);
+    if (ret < 0)
+        goto out_pb;
+    git_revwalk_push_head(walk);
+    ret = git_packbuilder_insert_walk(pb, walk);
+    git_revwalk_free(walk);
+    if (ret < 0)
+        goto out_pb;
+
+    ret = git_packbuilder_write(pb, NULL, 0, NULL, NULL);
+
+out_pb:
+    git_packbuilder_free(pb);
+out_repo:
+    git_repository_free(repo);
+    return ret;
+}
+
 int main(int argc, char **argv)
 {
     git_libgit2_init();
@@ -319,6 +418,20 @@ int main(int argc, char **argv)
             ret = 1;
         } else {
             ret = cmd_show(repo_path, argv[arg]);
+        }
+    } else if (strcmp(cmd, "repack") == 0) {
+        if (!repo_path) {
+            fprintf(stderr, "repack requires -C <repo>\n");
+            ret = 1;
+        } else {
+            ret = cmd_repack(repo_path);
+        }
+    } else if (strcmp(cmd, "fsck") == 0) {
+        if (!repo_path) {
+            fprintf(stderr, "fsck requires -C <repo>\n");
+            ret = 1;
+        } else {
+            ret = cmd_fsck(repo_path);
         }
     } else {
         fprintf(stderr, "Unknown command %s\n", cmd);
