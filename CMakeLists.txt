@@ -7,7 +7,7 @@ pkg_check_modules(LIBGIT2 REQUIRED libgit2)
 include_directories(${LIBGIT2_INCLUDE_DIRS} include)
 link_directories(${LIBGIT2_LIBRARY_DIRS})
 
-add_library(bup_odb STATIC src/bup_odb.c src/chunk_utils.c)
+add_library(bup_odb STATIC src/bup_odb.c src/chunk_utils.c src/bup_traversal.c)
 target_link_libraries(bup_odb ${LIBGIT2_LIBRARIES})
 
 add_executable(git2_bin src/git2.c)

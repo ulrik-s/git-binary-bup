@@ -1,4 +1,5 @@
 #include "bup_odb.h"
+#include "bup_traversal.h"
 #include <git2.h>
 #include <git2/sys/repository.h>
 #include <git2/sys/odb_backend.h>
@@ -260,26 +261,7 @@ out:
     return ret;
 }
 
-static int walk_tree(git_repository *repo, git_tree *tree)
-{
-    size_t count = git_tree_entrycount(tree);
-    for (size_t i = 0; i < count; i++) {
-        const git_tree_entry *entry = git_tree_entry_byindex(tree, i);
-        git_object *obj = NULL;
-        int ret = git_tree_entry_to_object(&obj, repo, entry);
-        if (ret < 0)
-            return ret;
-        if (git_object_type(obj) == GIT_OBJECT_TREE) {
-            ret = walk_tree(repo, (git_tree *)obj);
-            git_object_free(obj);
-            if (ret < 0)
-                return ret;
-        } else {
-            git_object_free(obj);
-        }
-    }
-    return 0;
-}
+/* walk_tree removed: replaced by bup_collect_reachable_oids */
 
 static int cmd_fsck(const char *repo_path)
 {
@@ -291,118 +273,26 @@ static int cmd_fsck(const char *repo_path)
     git_odb *odb = NULL;
     git_repository_odb(&odb, repo);
 
-    git_revwalk *walk = NULL;
-    ret = git_revwalk_new(&walk, repo);
+    bup_oid_list list = {0};
+    ret = bup_collect_reachable_oids(repo, &list);
     if (ret < 0)
         goto out;
-    git_revwalk_push_head(walk);
 
-    git_oid oid;
-    while ((ret = git_revwalk_next(&oid, walk)) == 0) {
-        git_commit *commit = NULL;
-        if (git_commit_lookup(&commit, repo, &oid) < 0) {
-            ret = -1;
-            break;
-        }
-        git_tree *tree = NULL;
-        if (git_commit_tree(&tree, commit) < 0) {
-            git_commit_free(commit);
-            ret = -1;
-            break;
-        }
-        ret = walk_tree(repo, tree);
-        git_tree_free(tree);
-        git_commit_free(commit);
-        if (ret < 0)
-            break;
+    for (size_t i = 0; i < list.count && ret == 0; i++) {
+        git_odb_object *obj = NULL;
+        ret = git_odb_read(&obj, odb, &list.oids[i]);
+        if (ret == 0)
+            git_odb_object_free(obj);
     }
 
-    if (ret == GIT_ITEROVER)
-        ret = 0;
-
-    git_revwalk_free(walk);
 out:
+    bup_oid_list_clear(&list);
     git_odb_free(odb);
     git_repository_free(repo);
     return ret;
 }
 
-typedef struct {
-    git_oid *oids;
-    size_t count;
-    size_t cap;
-} oid_list;
-
-static int oid_list_add(oid_list *list, const git_oid *oid)
-{
-    for (size_t i = 0; i < list->count; i++)
-        if (git_oid_cmp(&list->oids[i], oid) == 0)
-            return 0;
-    if (list->count == list->cap) {
-        size_t new_cap = list->cap ? list->cap * 2 : 32;
-        git_oid *tmp = realloc(list->oids, new_cap * sizeof(git_oid));
-        if (!tmp)
-            return -1;
-        list->oids = tmp;
-        list->cap = new_cap;
-    }
-    git_oid_cpy(&list->oids[list->count++], oid);
-    return 0;
-}
-
-static int collect_tree_oids(git_repository *repo, git_tree *tree, oid_list *list)
-{
-    size_t count = git_tree_entrycount(tree);
-    for (size_t i = 0; i < count; i++) {
-        const git_tree_entry *entry = git_tree_entry_byindex(tree, i);
-        const git_oid *oid = git_tree_entry_id(entry);
-        if (oid_list_add(list, oid) < 0)
-            return -1;
-        if (git_tree_entry_type(entry) == GIT_OBJECT_TREE) {
-            git_object *obj = NULL;
-            if (git_tree_entry_to_object(&obj, repo, entry) < 0)
-                return -1;
-            int ret = collect_tree_oids(repo, (git_tree *)obj, list);
-            git_object_free(obj);
-            if (ret < 0)
-                return ret;
-        }
-    }
-    return 0;
-}
-
-static int collect_reachable_oids(git_repository *repo, oid_list *list)
-{
-    git_revwalk *walk = NULL;
-    int ret = git_revwalk_new(&walk, repo);
-    if (ret < 0)
-        return ret;
-    git_revwalk_push_head(walk);
-
-    git_oid oid;
-    while ((ret = git_revwalk_next(&oid, walk)) == 0) {
-        if (oid_list_add(list, &oid) < 0)
-            break;
-        git_commit *commit = NULL;
-        if (git_commit_lookup(&commit, repo, &oid) < 0) {
-            ret = -1;
-            break;
-        }
-        git_tree *tree = NULL;
-        if (git_commit_tree(&tree, commit) < 0) {
-            git_commit_free(commit);
-            ret = -1;
-            break;
-        }
-        ret = collect_tree_oids(repo, tree, list);
-        git_tree_free(tree);
-        git_commit_free(commit);
-        if (ret < 0)
-            break;
-    }
-    git_revwalk_free(walk);
-    return ret == GIT_ITEROVER ? 0 : ret;
-}
+/* traversal helpers implemented in bup_traversal.c */
 
 static void remove_loose_objects(const char *repo_path)
 {
@@ -416,11 +306,11 @@ static void remove_loose_objects(const char *repo_path)
         return;
     }
 
-    oid_list keep = {0};
-    if (collect_reachable_oids(repo, &keep) < 0) {
+    bup_oid_list keep = {0};
+    if (bup_collect_reachable_oids(repo, &keep) < 0) {
         git_odb_free(odb);
         git_repository_free(repo);
-        free(keep.oids);
+        bup_oid_list_clear(&keep);
         return;
     }
 
@@ -430,7 +320,7 @@ static void remove_loose_objects(const char *repo_path)
     if (!d) {
         git_odb_free(odb);
         git_repository_free(repo);
-        free(keep.oids);
+        bup_oid_list_clear(&keep);
         return;
     }
 
@@ -470,7 +360,7 @@ static void remove_loose_objects(const char *repo_path)
     }
 
     closedir(d);
-    free(keep.oids);
+    bup_oid_list_clear(&keep);
     git_odb_free(odb);
     git_repository_free(repo);
 }
@@ -487,13 +377,14 @@ static int cmd_repack(const char *repo_path)
     if (ret < 0)
         goto out_repo;
 
-    git_revwalk *walk = NULL;
-    ret = git_revwalk_new(&walk, repo);
+    bup_oid_list list = {0};
+    ret = bup_collect_reachable_oids(repo, &list);
     if (ret < 0)
         goto out_pb;
-    git_revwalk_push_head(walk);
-    ret = git_packbuilder_insert_walk(pb, walk);
-    git_revwalk_free(walk);
+
+    for (size_t i = 0; i < list.count && ret == 0; i++)
+        ret = git_packbuilder_insert(pb, &list.oids[i], NULL);
+    bup_oid_list_clear(&list);
     if (ret < 0)
         goto out_pb;
 
