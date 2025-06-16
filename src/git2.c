@@ -350,7 +350,7 @@ static int oid_list_add(oid_list *list, const git_oid *oid)
     return 0;
 }
 
-static int collect_tree_oids(git_repository *repo, git_tree *tree, oid_list *list)
+static int collect_tree_oids(git_repository *repo, git_odb *odb, git_tree *tree, oid_list *list)
 {
     size_t count = git_tree_entrycount(tree);
     for (size_t i = 0; i < count; i++) {
@@ -362,10 +362,32 @@ static int collect_tree_oids(git_repository *repo, git_tree *tree, oid_list *lis
             git_object *obj = NULL;
             if (git_tree_entry_to_object(&obj, repo, entry) < 0)
                 return -1;
-            int ret = collect_tree_oids(repo, (git_tree *)obj, list);
+            int ret = collect_tree_oids(repo, odb, (git_tree *)obj, list);
             git_object_free(obj);
             if (ret < 0)
                 return ret;
+        } else if (git_tree_entry_type(entry) == GIT_OBJECT_BLOB) {
+            git_odb_object *obj = NULL;
+            if (git_odb_read(&obj, odb, oid) == 0) {
+                git_oid *oids = NULL;
+                size_t *lens = NULL;
+                size_t n = 0;
+                if (parse_chunk_list(git_odb_object_data(obj),
+                                     git_odb_object_size(obj),
+                                     &oids, &lens, &n) == 0) {
+                    for (size_t j = 0; j < n; j++) {
+                        if (oid_list_add(list, &oids[j]) < 0) {
+                            free(oids);
+                            free(lens);
+                            git_odb_object_free(obj);
+                            return -1;
+                        }
+                    }
+                    free(oids);
+                    free(lens);
+                }
+                git_odb_object_free(obj);
+            }
         }
     }
     return 0;
@@ -378,6 +400,12 @@ static int collect_reachable_oids(git_repository *repo, oid_list *list)
     if (ret < 0)
         return ret;
     git_revwalk_push_head(walk);
+
+    git_odb *odb = NULL;
+    if (git_repository_odb(&odb, repo) < 0) {
+        git_revwalk_free(walk);
+        return -1;
+    }
 
     git_oid oid;
     while ((ret = git_revwalk_next(&oid, walk)) == 0) {
@@ -394,13 +422,20 @@ static int collect_reachable_oids(git_repository *repo, oid_list *list)
             ret = -1;
             break;
         }
-        ret = collect_tree_oids(repo, tree, list);
+        if (oid_list_add(list, git_tree_id(tree)) < 0) {
+            git_tree_free(tree);
+            git_commit_free(commit);
+            ret = -1;
+            break;
+        }
+        ret = collect_tree_oids(repo, odb, tree, list);
         git_tree_free(tree);
         git_commit_free(commit);
         if (ret < 0)
             break;
     }
     git_revwalk_free(walk);
+    git_odb_free(odb);
     return ret == GIT_ITEROVER ? 0 : ret;
 }
 
@@ -487,13 +522,17 @@ static int cmd_repack(const char *repo_path)
     if (ret < 0)
         goto out_repo;
 
-    git_revwalk *walk = NULL;
-    ret = git_revwalk_new(&walk, repo);
-    if (ret < 0)
+    oid_list objs = {0};
+    ret = collect_reachable_oids(repo, &objs);
+    if (ret < 0) {
+        free(objs.oids);
         goto out_pb;
-    git_revwalk_push_head(walk);
-    ret = git_packbuilder_insert_walk(pb, walk);
-    git_revwalk_free(walk);
+    }
+
+    for (size_t i = 0; i < objs.count && ret == 0; i++)
+        ret = git_packbuilder_insert(pb, &objs.oids[i], NULL);
+
+    free(objs.oids);
     if (ret < 0)
         goto out_pb;
 
