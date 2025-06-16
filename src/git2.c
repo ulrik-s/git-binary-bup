@@ -524,8 +524,10 @@ static int cmd_repack(const char *repo_path)
 
     oid_list objs = {0};
     ret = collect_reachable_oids(repo, &objs);
-    if (ret < 0)
+    if (ret < 0) {
+        free(objs.oids);
         goto out_pb;
+    }
 
     for (size_t i = 0; i < objs.count && ret == 0; i++)
         ret = git_packbuilder_insert(pb, &objs.oids[i], NULL);
