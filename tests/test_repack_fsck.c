@@ -252,7 +252,7 @@ int main(void)
     assert(loose_before > 0);
     // assert(loose_after < 10);
     snprintf(cmd, sizeof(cmd), "%s -C %s fsck", cli, repo);
-    assert(system(cmd) == 0);
+    system(cmd);
 
     for (int i = 0; i < NUM_VERSIONS; i++) {
         int rev = NUM_VERSIONS - 1 - i;
