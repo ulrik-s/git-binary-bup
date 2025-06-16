@@ -117,6 +117,35 @@ static size_t count_pack_files(const char *repo)
     return count;
 }
 
+static size_t count_loose_objects(const char *repo)
+{
+    char objpath[512];
+    snprintf(objpath, sizeof(objpath), "%s/.git/objects", repo);
+    DIR *d = opendir(objpath);
+    if (!d)
+        return 0;
+    size_t count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (strlen(ent->d_name) != 2)
+            continue;
+        char subdir[512];
+        snprintf(subdir, sizeof(subdir), "%s/%s", objpath, ent->d_name);
+        DIR *sd = opendir(subdir);
+        if (!sd)
+            continue;
+        struct dirent *ent2;
+        while ((ent2 = readdir(sd))) {
+            if (!strcmp(ent2->d_name, ".") || !strcmp(ent2->d_name, ".."))
+                continue;
+            count++;
+        }
+        closedir(sd);
+    }
+    closedir(d);
+    return count;
+}
+
 int main(void)
 {
     git_libgit2_init();
@@ -201,15 +230,18 @@ int main(void)
 
     long long size_before = dir_size(repo);
     size_t pack_before = count_pack_files(repo);
-    printf("size_before_pack=%lld pack_files_before=%zu\n", size_before,
-           pack_before);
+    size_t loose_before = count_loose_objects(repo);
+    printf("size_before_pack=%lld pack_files_before=%zu loose_before=%zu\n",
+           size_before, pack_before, loose_before);
 
     snprintf(cmd, sizeof(cmd), "%s -C %s repack", cli, repo);
     assert(system(cmd) == 0);
     long long size_after = dir_size(repo);
     size_t pack_after = count_pack_files(repo);
-    printf("size_after_pack=%lld pack_files_after=%zu\n", size_after,
-           pack_after);
+    size_t loose_after = count_loose_objects(repo);
+    printf(
+        "size_after_pack=%lld pack_files_after=%zu loose_after=%zu\n",
+        size_after, pack_after, loose_after);
     assert(pack_before == 0);
     assert(pack_after == 1);
     snprintf(cmd, sizeof(cmd), "%s -C %s fsck", cli, repo);
