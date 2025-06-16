@@ -153,7 +153,6 @@ int main(void)
 
     const char *cli = detect_cli();
     git_odb_backend *backend = NULL;
-    assert(bup_odb_backend_new(&backend, NULL) == 0);
 
     char repo_tmp[] = REPO_TEMPLATE;
     char *repo = mkdtemp(repo_tmp);
@@ -162,6 +161,8 @@ int main(void)
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "%s init %s", cli, repo);
     assert(system(cmd) == 0);
+
+    assert(bup_odb_backend_new(&backend, repo) == 0);
 
     setenv("GIT_AUTHOR_NAME", "Tester", 1);
     setenv("GIT_AUTHOR_EMAIL", "tester@example.com", 1);
@@ -239,11 +240,17 @@ int main(void)
     long long size_after = dir_size(repo);
     size_t pack_after = count_pack_files(repo);
     size_t loose_after = count_loose_objects(repo);
+    for (int i = 0; loose_after && i < 10; i++) {
+        usleep(100000);
+        loose_after = count_loose_objects(repo);
+    }
     printf(
         "size_after_pack=%lld pack_files_after=%zu loose_after=%zu\n",
         size_after, pack_after, loose_after);
     assert(pack_before == 0);
     assert(pack_after == 1);
+    assert(loose_before > 0);
+    assert(loose_after == 0);
     snprintf(cmd, sizeof(cmd), "%s -C %s fsck", cli, repo);
     assert(system(cmd) == 0);
 

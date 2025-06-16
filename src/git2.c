@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <git2/pack.h>
+#include <dirent.h>
+#include <unistd.h>
 
 static int cmd_hash_object(const char *file)
 {
@@ -325,6 +327,36 @@ out:
     return ret;
 }
 
+static void remove_loose_objects(const char *repo_path)
+{
+    char objdir[512];
+    snprintf(objdir, sizeof(objdir), "%s/.git/objects", repo_path);
+    DIR *d = opendir(objdir);
+    if (!d)
+        return;
+    struct dirent *ent;
+    char path[512];
+    char file[512];
+    while ((ent = readdir(d))) {
+        if (strlen(ent->d_name) != 2)
+            continue;
+        snprintf(path, sizeof(path), "%s/%s", objdir, ent->d_name);
+        DIR *sd = opendir(path);
+        if (!sd)
+            continue;
+        struct dirent *ent2;
+        while ((ent2 = readdir(sd))) {
+            if (!strcmp(ent2->d_name, ".") || !strcmp(ent2->d_name, ".."))
+                continue;
+            snprintf(file, sizeof(file), "%s/%s", path, ent2->d_name);
+            unlink(file);
+        }
+        closedir(sd);
+        rmdir(path);
+    }
+    closedir(d);
+}
+
 static int cmd_repack(const char *repo_path)
 {
     git_repository *repo = NULL;
@@ -348,11 +380,19 @@ static int cmd_repack(const char *repo_path)
         goto out_pb;
 
     ret = git_packbuilder_write(pb, NULL, 0, NULL, NULL);
+    git_packbuilder_free(pb);
+    pb = NULL;
+    git_repository_free(repo);
+    repo = NULL;
+    if (ret == 0)
+        remove_loose_objects(repo_path);
 
 out_pb:
-    git_packbuilder_free(pb);
+    if (pb)
+        git_packbuilder_free(pb);
 out_repo:
-    git_repository_free(repo);
+    if (repo)
+        git_repository_free(repo);
     return ret;
 }
 
