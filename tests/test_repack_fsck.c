@@ -127,6 +127,8 @@ static size_t count_loose_objects(const char *repo)
     size_t count = 0;
     struct dirent *ent;
     while ((ent = readdir(d))) {
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
+            continue;
         if (strlen(ent->d_name) != 2)
             continue;
         char subdir[512];
