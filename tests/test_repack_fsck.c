@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
-#define FILE_SIZE 10000
+#define FILE_SIZE 100000
 #define CHANGE_BLOCK 10
 #define NUM_VERSIONS 100
 #define REPO_TEMPLATE "repack_repoXXXXXX"
