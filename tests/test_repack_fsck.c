@@ -250,7 +250,7 @@ int main(void)
     assert(pack_before == 0);
     assert(pack_after == 1);
     assert(loose_before > 0);
-    // assert(loose_after < 10);
+    assert(loose_after < loose_before);
     snprintf(cmd, sizeof(cmd), "%s -C %s fsck", cli, repo);
     system(cmd);
 
