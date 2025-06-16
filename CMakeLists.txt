@@ -34,3 +34,8 @@ add_executable(test_many_commits tests/test_many_commits.c)
 target_link_libraries(test_many_commits bup_odb ${LIBGIT2_LIBRARIES})
 add_test(NAME test_many_commits COMMAND test_many_commits)
 set_tests_properties(test_many_commits PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+add_executable(test_history_chunks tests/test_history_chunks.c)
+target_link_libraries(test_history_chunks bup_odb ${LIBGIT2_LIBRARIES})
+add_test(NAME test_history_chunks COMMAND test_history_chunks)
+set_tests_properties(test_history_chunks PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
