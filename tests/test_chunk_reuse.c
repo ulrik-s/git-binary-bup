@@ -26,7 +26,7 @@ static size_t store_blob_and_get_chunks(git_odb_backend *backend,
                                         size_t **lens)
 {
     assert(backend->write(backend, oid, data, size, GIT_OBJECT_BLOB) == 0);
-    return bup_backend_object_chunks(backend, oid, chunks, lens);
+    return bup_backend_object_chunk_count(backend, oid, chunks, lens);
 }
 
 static int chunk_reused(const git_oid *chunk, const git_oid *old_chunks,

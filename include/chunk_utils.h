@@ -37,5 +37,7 @@ bup_chunk *chunk_get_or_create(git_odb *odb, bup_chunk **pool,
 void chunk_pool_free(bup_chunk **pool);
 int chunk_pool_count(void);
 size_t chunk_pool_total_size(void);
+int parse_chunk_list(const char *data, size_t size, git_oid **oids,
+                     size_t **lengths, size_t *count);
 
 #endif /* CHUNK_UTILS_H */
