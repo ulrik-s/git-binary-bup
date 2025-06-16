@@ -27,6 +27,84 @@ static int cmd_init(const char *path)
     return ret;
 }
 
+static int cmd_show(const char *repo_path, const char *spec)
+{
+    git_repository *repo = NULL;
+    int ret = git_repository_open(&repo, repo_path ? repo_path : ".");
+    if (ret < 0)
+        return ret;
+
+    git_odb *odb = NULL;
+    git_odb_backend *backend = NULL;
+    if (git_repository_odb(&odb, repo) == 0 &&
+        bup_odb_backend_new(&backend, repo_path ? repo_path : NULL) == 0)
+        git_odb_add_backend(odb, backend, 999);
+
+    const char *colon = strchr(spec, ':');
+    const char *rev = spec;
+    const char *path = NULL;
+    if (colon) {
+        rev = strndup(spec, colon - spec);
+        path = colon + 1;
+    }
+
+    git_object *obj = NULL;
+    ret = git_revparse_single(&obj, repo, rev);
+    if (colon)
+        free((char *)rev);
+    if (ret < 0) {
+        git_repository_free(repo);
+        return ret;
+    }
+
+    git_tree *tree = NULL;
+    if (git_object_type(obj) == GIT_OBJECT_COMMIT) {
+        ret = git_commit_tree(&tree, (git_commit *)obj);
+        git_object_free(obj);
+        if (ret < 0) {
+            git_repository_free(repo);
+            return ret;
+        }
+    } else if (git_object_type(obj) == GIT_OBJECT_TREE) {
+        tree = (git_tree *)obj;
+    } else {
+        git_object_free(obj);
+        git_repository_free(repo);
+        return -1;
+    }
+
+    git_tree_entry *entry = NULL;
+    ret = git_tree_entry_bypath(&entry, tree, path ? path : spec + strlen(spec));
+    if (ret < 0) {
+        if (git_object_type(obj) == GIT_OBJECT_TREE)
+            git_tree_free(tree);
+        else
+            git_tree_free(tree);
+        git_repository_free(repo);
+        return ret;
+    }
+
+    const git_oid *oid = git_tree_entry_id(entry);
+    void *buf = NULL;
+    size_t len = 0;
+    git_object_t type = 0;
+    if (backend->read(&buf, &len, &type, backend, oid) == 0) {
+        fwrite(buf, 1, len, stdout);
+        free(buf);
+    } else {
+        git_tree_entry_free(entry);
+        git_tree_free(tree);
+        git_odb_free(odb);
+        git_repository_free(repo);
+        return -1;
+    }
+    git_tree_entry_free(entry);
+    git_tree_free(tree);
+    git_odb_free(odb);
+    git_repository_free(repo);
+    return 0;
+}
+
 static git_signature *make_signature(const char *name_env, const char *email_env)
 {
     const char *name = getenv(name_env);
@@ -234,6 +312,13 @@ int main(int argc, char **argv)
             } else {
                 ret = cmd_commit(repo_path, msg);
             }
+        }
+    } else if (strcmp(cmd, "show") == 0) {
+        if (arg >= argc) {
+            fprintf(stderr, "show requires an object spec\n");
+            ret = 1;
+        } else {
+            ret = cmd_show(repo_path, argv[arg]);
         }
     } else {
         fprintf(stderr, "Unknown command %s\n", cmd);

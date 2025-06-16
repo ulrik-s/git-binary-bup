@@ -76,6 +76,23 @@ static long long dir_size(const char *path)
     return sum;
 }
 
+static void verify_head_blob(const char *cli, const char *repo, const char *path,
+                             const char *data, size_t len)
+{
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s -C %s show HEAD:%s", cli, repo, path);
+    FILE *p = popen(cmd, "r");
+    assert(p);
+    char *buf = malloc(len);
+    size_t r = fread(buf, 1, len, p);
+    assert(r == len);
+    int c = fgetc(p);
+    assert(c == EOF);
+    pclose(p);
+    assert(memcmp(buf, data, len) == 0);
+    free(buf);
+}
+
 int main(void)
 {
     git_libgit2_init();
@@ -133,6 +150,7 @@ int main(void)
     assert(system(cmd) == 0);
     snprintf(cmd, sizeof(cmd), "%s -C %s commit -m first", cli, repo);
     assert(system(cmd) == 0);
+    verify_head_blob(cli, repo, "file.bin", data, LARGE_SIZE);
 
     long long git_first = dir_size(repo);
     size_t bup_first_size = bup_backend_total_size();
@@ -178,6 +196,7 @@ int main(void)
     assert(system(cmd) == 0);
     snprintf(cmd, sizeof(cmd), "%s -C %s commit -m second", cli, repo);
     assert(system(cmd) == 0);
+    verify_head_blob(cli, repo, "file.bin", data2, LARGE_SIZE);
 
     long long git_second = dir_size(repo);
     printf("git_second=%lld\n", git_second);

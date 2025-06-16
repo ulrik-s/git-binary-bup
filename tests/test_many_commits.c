@@ -73,6 +73,23 @@ static long long dir_size(const char *path)
     return sum;
 }
 
+static void verify_head_blob(const char *cli, const char *repo, const char *path,
+                             const char *data, size_t len)
+{
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s -C %s show HEAD:%s", cli, repo, path);
+    FILE *p = popen(cmd, "r");
+    assert(p);
+    char *buf = malloc(len);
+    size_t r = fread(buf, 1, len, p);
+    assert(r == len);
+    int c = fgetc(p);
+    assert(c == EOF);
+    pclose(p);
+    assert(memcmp(buf, data, len) == 0);
+    free(buf);
+}
+
 static void commit_file(const char *cli, const char *repo, const char *msg)
 {
     char cmd[512];
@@ -116,6 +133,7 @@ int main(void)
     fclose(f);
 
     commit_file(cli, repo, "initial");
+    verify_head_blob(cli, repo, FILE_NAME, data, FILE_SIZE);
 
     git_oid *chunks = NULL;
     size_t *lens = NULL;
@@ -139,6 +157,7 @@ int main(void)
         char msg[64];
         snprintf(msg, sizeof(msg), "change %d", i + 1);
         commit_file(cli, repo, msg);
+        verify_head_blob(cli, repo, FILE_NAME, data, FILE_SIZE);
 
         git_oid *new_chunks = NULL;
         size_t *new_lens = NULL;
